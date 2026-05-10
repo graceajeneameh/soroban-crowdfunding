@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol,
 };
 
 // ── Storage keys ────────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ fn donation_key(campaign_id: u64, donor: &Address) -> (Symbol, u64, Address) {
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum CampaignStatus {
     Pending,
     Active,
@@ -30,7 +30,7 @@ pub enum CampaignStatus {
 }
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum CampaignType {
     Open,
     Curated,

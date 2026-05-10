@@ -15,7 +15,7 @@ fn grant_key(id: u64) -> (Symbol, u64) {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum GrantStatus {
     Active,
     Completed,
@@ -23,7 +23,7 @@ pub enum GrantStatus {
 }
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum MilestoneStatus {
     Pending,
     Submitted,

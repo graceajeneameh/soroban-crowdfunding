@@ -27,7 +27,7 @@ fn proj_cnt_key(round_id: u64) -> (Symbol, u64) {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum RoundStatus {
     Active,
     Finalized,
