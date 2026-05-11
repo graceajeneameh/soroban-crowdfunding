@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol,
 };
@@ -143,7 +144,9 @@ impl CampaignContract {
         assert!(c.status == CampaignStatus::Pending, "not pending");
 
         c.status = CampaignStatus::Active;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("approved")),
@@ -161,10 +164,7 @@ impl CampaignContract {
             .get(&campaign_key(campaign_id))
             .expect("campaign not found");
 
-        assert!(
-            caller == c.creator || caller == admin,
-            "unauthorized"
-        );
+        assert!(caller == c.creator || caller == admin, "unauthorized");
         assert!(
             c.status == CampaignStatus::Pending || c.status == CampaignStatus::Active,
             "cannot cancel"
@@ -172,7 +172,9 @@ impl CampaignContract {
         assert!(c.raised == 0, "has donations; use refund flow");
 
         c.status = CampaignStatus::Cancelled;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("cancelled")),
@@ -205,17 +207,17 @@ impl CampaignContract {
 
         // Update or create donation record
         let key = donation_key(campaign_id, &donor);
-        let mut rec: DonationRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(DonationRecord {
-                campaign_id,
-                donor: donor.clone(),
-                amount: 0,
-                refunded: false,
-                ledger: env.ledger().sequence(),
-            });
+        let mut rec: DonationRecord =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(DonationRecord {
+                    campaign_id,
+                    donor: donor.clone(),
+                    amount: 0,
+                    refunded: false,
+                    ledger: env.ledger().sequence(),
+                });
         rec.amount += amount;
         rec.ledger = env.ledger().sequence();
         env.storage().persistent().set(&key, &rec);
@@ -228,7 +230,9 @@ impl CampaignContract {
                 campaign_id,
             );
         }
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("donated")),
@@ -258,7 +262,9 @@ impl CampaignContract {
         tok.transfer(&env.current_contract_address(), &c.creator, &payout);
 
         c.raised = 0;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("withdraw")),
@@ -281,7 +287,9 @@ impl CampaignContract {
         assert!(c.raised < c.goal, "goal was reached");
 
         c.status = CampaignStatus::Failed;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("failed")),
@@ -357,7 +365,13 @@ mod tests {
         Env, String,
     };
 
-    fn setup() -> (Env, CampaignContractClient<'static>, Address, Address, Address) {
+    fn setup() -> (
+        Env,
+        CampaignContractClient<'static>,
+        Address,
+        Address,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CampaignContract);

@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol, Vec,
 };
@@ -16,8 +17,21 @@ fn project_key(round_id: u64, project_id: u64) -> (Symbol, u64, u64) {
     (symbol_short!("PROJ"), round_id, project_id)
 }
 
-fn contrib_key(round_id: u64, project_id: u64, contributor: &Address) -> (Symbol, u64, u64, Address) {
-    (symbol_short!("CONTRIB"), round_id, project_id, contributor.clone())
+fn contrib_key(
+    round_id: u64,
+    project_id: u64,
+    contributor: &Address,
+) -> (Symbol, u64, u64, Address) {
+    (
+        symbol_short!("CONTRIB"),
+        round_id,
+        project_id,
+        contributor.clone(),
+    )
+}
+
+fn whitelist_key(round_id: u64, address: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("WHITE"), round_id, address.clone())
 }
 
 fn proj_cnt_key(round_id: u64) -> (Symbol, u64) {
@@ -45,6 +59,7 @@ pub struct Round {
     pub description: String,
     pub start_ledger: u32,
     pub end_ledger: u32,
+    pub whitelist_enabled: bool,
     pub status: RoundStatus,
 }
 
@@ -112,6 +127,7 @@ impl QuadraticContract {
         description: String,
         start_ledger: u32,
         end_ledger: u32,
+        whitelist_enabled: bool,
     ) -> u64 {
         admin.require_auth();
         assert!(matching_pool > 0, "matching pool must be positive");
@@ -133,6 +149,7 @@ impl QuadraticContract {
             description,
             start_ledger,
             end_ledger,
+            whitelist_enabled,
             status: RoundStatus::Active,
         };
 
@@ -145,6 +162,40 @@ impl QuadraticContract {
             (id, admin, matching_pool),
         );
         id
+    }
+
+    /// Add an address to a round's contributor whitelist.
+    pub fn add_to_whitelist(env: Env, round_id: u64, address: Address) {
+        let round: Round = env
+            .storage()
+            .persistent()
+            .get(&round_key(round_id))
+            .expect("round not found");
+        round.admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&whitelist_key(round_id, &address), &true);
+        env.events().publish(
+            (symbol_short!("round"), symbol_short!("white_add")),
+            (round_id, address),
+        );
+    }
+
+    /// Remove an address from a round's contributor whitelist.
+    pub fn remove_from_whitelist(env: Env, round_id: u64, address: Address) {
+        let round: Round = env
+            .storage()
+            .persistent()
+            .get(&round_key(round_id))
+            .expect("round not found");
+        round.admin.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&whitelist_key(round_id, &address));
+        env.events().publish(
+            (symbol_short!("round"), symbol_short!("white_rm")),
+            (round_id, address),
+        );
     }
 
     /// Register a project in an active round.
@@ -195,7 +246,13 @@ impl QuadraticContract {
     }
 
     /// Contribute to a project. First contribution per address increments contributor_count.
-    pub fn contribute(env: Env, contributor: Address, round_id: u64, project_id: u64, amount: i128) {
+    pub fn contribute(
+        env: Env,
+        contributor: Address,
+        round_id: u64,
+        project_id: u64,
+        amount: i128,
+    ) {
         contributor.require_auth();
         assert!(amount > 0, "amount must be positive");
 
@@ -209,6 +266,10 @@ impl QuadraticContract {
             env.ledger().sequence() >= round.start_ledger
                 && env.ledger().sequence() <= round.end_ledger,
             "outside round window"
+        );
+        assert!(
+            !round.whitelist_enabled || Self::is_whitelisted_internal(&env, round_id, &contributor),
+            "not whitelisted"
         );
 
         let mut project: Project = env
@@ -224,16 +285,12 @@ impl QuadraticContract {
         );
 
         let ck = contrib_key(round_id, project_id, &contributor);
-        let mut rec: Contribution = env
-            .storage()
-            .persistent()
-            .get(&ck)
-            .unwrap_or(Contribution {
-                round_id,
-                project_id,
-                contributor: contributor.clone(),
-                amount: 0,
-            });
+        let mut rec: Contribution = env.storage().persistent().get(&ck).unwrap_or(Contribution {
+            round_id,
+            project_id,
+            contributor: contributor.clone(),
+            amount: 0,
+        });
 
         // First contribution → increment unique contributor count
         if rec.amount == 0 {
@@ -333,11 +390,27 @@ impl QuadraticContract {
             .expect("project not found")
     }
 
-    pub fn get_contribution(env: Env, round_id: u64, project_id: u64, contributor: Address) -> Contribution {
+    pub fn get_contribution(
+        env: Env,
+        round_id: u64,
+        project_id: u64,
+        contributor: Address,
+    ) -> Contribution {
         env.storage()
             .persistent()
             .get(&contrib_key(round_id, project_id, &contributor))
             .expect("contribution not found")
+    }
+
+    pub fn is_whitelisted(env: Env, round_id: u64, address: Address) -> bool {
+        Self::is_whitelisted_internal(&env, round_id, &address)
+    }
+
+    fn is_whitelisted_internal(env: &Env, round_id: u64, address: &Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&whitelist_key(round_id, address))
+            .unwrap_or(false)
     }
 }
 
@@ -375,7 +448,9 @@ mod tests {
     #[test]
     fn full_round_lifecycle() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let tok = StellarAssetClient::new(&env, &token_addr);
 
         let owner1 = Address::generate(&env);
@@ -398,6 +473,7 @@ mod tests {
             &String::from_str(&env, "Test round"),
             &seq,
             &(seq + 100),
+            &false,
         );
 
         let p1 = client.register_project(
@@ -436,7 +512,9 @@ mod tests {
     #[test]
     fn contributor_count_unique_only() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
         let contributor = Address::generate(&env);
         StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);
@@ -451,6 +529,7 @@ mod tests {
             &String::from_str(&env, "D"),
             &seq,
             &(seq + 100),
+            &false,
         );
         let proj_id = client.register_project(
             &round_id,
@@ -465,5 +544,139 @@ mod tests {
         let p = client.get_project(&round_id, &proj_id);
         assert_eq!(p.contributor_count, 1); // still 1 unique contributor
         assert_eq!(p.total_contributions, 200);
+    }
+
+    #[test]
+    fn whitelist_disabled_allows_any_contributor() {
+        let (env, client, admin) = setup();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
+        let contributor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);
+        let owner = Address::generate(&env);
+        let seq = env.ledger().sequence();
+        let round_id = client.create_round(
+            &admin,
+            &token_addr,
+            &1_000i128,
+            &String::from_str(&env, "Open"),
+            &String::from_str(&env, "No whitelist"),
+            &seq,
+            &(seq + 100),
+            &false,
+        );
+        let project_id = client.register_project(
+            &round_id,
+            &owner,
+            &String::from_str(&env, "Project"),
+            &String::from_str(&env, "Desc"),
+        );
+
+        client.contribute(&contributor, &round_id, &project_id, &100i128);
+
+        assert_eq!(
+            client.get_project(&round_id, &project_id).contributor_count,
+            1
+        );
+    }
+
+    #[test]
+    fn whitelist_enabled_allows_whitelisted_contributor() {
+        let (env, client, admin) = setup();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
+        let contributor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);
+        let owner = Address::generate(&env);
+        let seq = env.ledger().sequence();
+        let round_id = client.create_round(
+            &admin,
+            &token_addr,
+            &1_000i128,
+            &String::from_str(&env, "Private"),
+            &String::from_str(&env, "Whitelist"),
+            &seq,
+            &(seq + 100),
+            &true,
+        );
+        let project_id = client.register_project(
+            &round_id,
+            &owner,
+            &String::from_str(&env, "Project"),
+            &String::from_str(&env, "Desc"),
+        );
+
+        client.add_to_whitelist(&round_id, &contributor);
+        assert!(client.is_whitelisted(&round_id, &contributor));
+        client.contribute(&contributor, &round_id, &project_id, &100i128);
+
+        assert_eq!(
+            client
+                .get_project(&round_id, &project_id)
+                .total_contributions,
+            100
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not whitelisted")]
+    fn whitelist_enabled_rejects_non_whitelisted_contributor() {
+        let (env, client, admin) = setup();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
+        let contributor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);
+        let owner = Address::generate(&env);
+        let seq = env.ledger().sequence();
+        let round_id = client.create_round(
+            &admin,
+            &token_addr,
+            &1_000i128,
+            &String::from_str(&env, "Private"),
+            &String::from_str(&env, "Whitelist"),
+            &seq,
+            &(seq + 100),
+            &true,
+        );
+        let project_id = client.register_project(
+            &round_id,
+            &owner,
+            &String::from_str(&env, "Project"),
+            &String::from_str(&env, "Desc"),
+        );
+
+        client.contribute(&contributor, &round_id, &project_id, &100i128);
+    }
+
+    #[test]
+    fn remove_from_whitelist_revokes_access() {
+        let (env, client, admin) = setup();
+        let contributor = Address::generate(&env);
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
+        let seq = env.ledger().sequence();
+        let round_id = client.create_round(
+            &admin,
+            &token_addr,
+            &1_000i128,
+            &String::from_str(&env, "Private"),
+            &String::from_str(&env, "Whitelist"),
+            &seq,
+            &(seq + 100),
+            &true,
+        );
+
+        client.add_to_whitelist(&round_id, &contributor);
+        assert!(client.is_whitelisted(&round_id, &contributor));
+        client.remove_from_whitelist(&round_id, &contributor);
+        assert!(!client.is_whitelisted(&round_id, &contributor));
     }
 }
