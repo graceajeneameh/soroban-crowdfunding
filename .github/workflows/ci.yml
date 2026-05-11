@@ -19,7 +19,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -35,7 +35,7 @@ jobs:
         run: cargo build --all
 
       - name: Build (WASM)
-        run: cargo build --target wasm32-unknown-unknown --release --all
+        run: cargo build --target wasm32v1-none --release --all
 
       - name: Run tests
         run: cargo test --all

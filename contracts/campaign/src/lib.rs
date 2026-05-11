@@ -1,6 +1,7 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol, Vec,
 };
 
 // ── Storage keys ────────────────────────────────────────────────────────────
@@ -8,6 +9,7 @@ use soroban_sdk::{
 const ADMIN: Symbol = symbol_short!("ADMIN");
 const FEE_BPS: Symbol = symbol_short!("FEE_BPS");
 const CAMP_CNT: Symbol = symbol_short!("CAMP_CNT");
+const CATEGORIES: Symbol = symbol_short!("CATS");
 
 fn campaign_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("CAMP"), id)
@@ -78,6 +80,54 @@ impl CampaignContract {
         env.storage().instance().set(&ADMIN, &admin);
         env.storage().instance().set(&FEE_BPS, &fee_bps);
         env.storage().instance().set(&CAMP_CNT, &0u64);
+        env.storage()
+            .instance()
+            .set(&CATEGORIES, &Vec::<String>::new(&env));
+    }
+
+    /// Add an allowed campaign category.
+    pub fn add_category(env: Env, admin: Address, name: String) {
+        Self::require_admin(&env, &admin);
+        let mut categories = Self::load_categories(&env);
+        assert!(!Self::has_category(&categories, &name), "category exists");
+        categories.push_back(name.clone());
+        env.storage().instance().set(&CATEGORIES, &categories);
+        env.events().publish(
+            (
+                symbol_short!("campaign"),
+                Symbol::new(&env, "category_added"),
+            ),
+            name,
+        );
+    }
+
+    /// Remove an allowed campaign category.
+    pub fn remove_category(env: Env, admin: Address, name: String) {
+        Self::require_admin(&env, &admin);
+        let categories = Self::load_categories(&env);
+        let mut next = Vec::<String>::new(&env);
+        let mut found = false;
+        for category in categories.iter() {
+            if category == name {
+                found = true;
+            } else {
+                next.push_back(category);
+            }
+        }
+        assert!(found, "category not found");
+        env.storage().instance().set(&CATEGORIES, &next);
+        env.events().publish(
+            (
+                symbol_short!("campaign"),
+                Symbol::new(&env, "category_removed"),
+            ),
+            name,
+        );
+    }
+
+    /// Return the currently allowed campaign categories.
+    pub fn get_categories(env: Env) -> Vec<String> {
+        Self::load_categories(&env)
     }
 
     /// Create a new campaign. Open campaigns become Active immediately;
@@ -98,6 +148,10 @@ impl CampaignContract {
         assert!(
             deadline_ledger > env.ledger().sequence(),
             "deadline must be in the future"
+        );
+        assert!(
+            Self::has_category(&Self::load_categories(&env), &category),
+            "unknown category"
         );
 
         let id: u64 = env.storage().instance().get(&CAMP_CNT).unwrap_or(0);
@@ -143,7 +197,9 @@ impl CampaignContract {
         assert!(c.status == CampaignStatus::Pending, "not pending");
 
         c.status = CampaignStatus::Active;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("approved")),
@@ -161,10 +217,7 @@ impl CampaignContract {
             .get(&campaign_key(campaign_id))
             .expect("campaign not found");
 
-        assert!(
-            caller == c.creator || caller == admin,
-            "unauthorized"
-        );
+        assert!(caller == c.creator || caller == admin, "unauthorized");
         assert!(
             c.status == CampaignStatus::Pending || c.status == CampaignStatus::Active,
             "cannot cancel"
@@ -172,7 +225,9 @@ impl CampaignContract {
         assert!(c.raised == 0, "has donations; use refund flow");
 
         c.status = CampaignStatus::Cancelled;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("cancelled")),
@@ -205,17 +260,17 @@ impl CampaignContract {
 
         // Update or create donation record
         let key = donation_key(campaign_id, &donor);
-        let mut rec: DonationRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(DonationRecord {
-                campaign_id,
-                donor: donor.clone(),
-                amount: 0,
-                refunded: false,
-                ledger: env.ledger().sequence(),
-            });
+        let mut rec: DonationRecord =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(DonationRecord {
+                    campaign_id,
+                    donor: donor.clone(),
+                    amount: 0,
+                    refunded: false,
+                    ledger: env.ledger().sequence(),
+                });
         rec.amount += amount;
         rec.ledger = env.ledger().sequence();
         env.storage().persistent().set(&key, &rec);
@@ -228,7 +283,9 @@ impl CampaignContract {
                 campaign_id,
             );
         }
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("donated")),
@@ -258,7 +315,9 @@ impl CampaignContract {
         tok.transfer(&env.current_contract_address(), &c.creator, &payout);
 
         c.raised = 0;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("withdraw")),
@@ -281,7 +340,9 @@ impl CampaignContract {
         assert!(c.raised < c.goal, "goal was reached");
 
         c.status = CampaignStatus::Failed;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("failed")),
@@ -344,6 +405,28 @@ impl CampaignContract {
             .get(&donation_key(campaign_id, &donor))
             .expect("donation not found")
     }
+
+    fn require_admin(env: &Env, admin: &Address) {
+        let stored_admin: Address = env.storage().instance().get(&ADMIN).unwrap();
+        assert!(&stored_admin == admin, "unauthorized");
+        admin.require_auth();
+    }
+
+    fn load_categories(env: &Env) -> Vec<String> {
+        env.storage()
+            .instance()
+            .get(&CATEGORIES)
+            .unwrap_or(Vec::new(env))
+    }
+
+    fn has_category(categories: &Vec<String>, name: &String) -> bool {
+        for category in categories.iter() {
+            if &category == name {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -357,7 +440,13 @@ mod tests {
         Env, String,
     };
 
-    fn setup() -> (Env, CampaignContractClient<'static>, Address, Address, Address) {
+    fn setup() -> (
+        Env,
+        CampaignContractClient<'static>,
+        Address,
+        Address,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CampaignContract);
@@ -366,6 +455,8 @@ mod tests {
         let creator = Address::generate(&env);
         let donor = Address::generate(&env);
         client.initialize(&admin, &250u32); // 2.5% fee
+        client.add_category(&admin, &String::from_str(&env, "Tech"));
+        client.add_category(&admin, &String::from_str(&env, "Art"));
         (env, client, admin, creator, donor)
     }
 
@@ -451,5 +542,40 @@ mod tests {
         client.mark_failed(&id);
         client.refund(&donor, &id);
         assert_eq!(TokenClient::new(&env, &token).balance(&donor), 200);
+    }
+
+    #[test]
+    fn admin_can_manage_categories() {
+        let (env, client, admin, _, _) = setup();
+        let category = String::from_str(&env, "Education");
+        client.add_category(&admin, &category);
+        assert_eq!(client.get_categories().len(), 3);
+        client.remove_category(&admin, &category);
+        assert_eq!(client.get_categories().len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn non_admin_cannot_manage_categories() {
+        let (env, client, _, creator, _) = setup();
+        client.add_category(&creator, &String::from_str(&env, "Education"));
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown category")]
+    fn create_campaign_rejects_unknown_category() {
+        let (env, client, admin, creator, _) = setup();
+        let token = make_token(&env, &admin);
+        let deadline = env.ledger().sequence() + 100;
+        client.create_campaign(
+            &creator,
+            &token,
+            &100i128,
+            &String::from_str(&env, "Unknown"),
+            &String::from_str(&env, "Desc"),
+            &String::from_str(&env, "Unknown"),
+            &CampaignType::Open,
+            &deadline,
+        );
     }
 }

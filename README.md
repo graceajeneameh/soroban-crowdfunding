@@ -25,10 +25,10 @@ A production-ready, open-source decentralized crowdfunding and public goods fund
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Add WASM target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Install Stellar CLI
-cargo install --locked stellar-cli --features opt
+cargo install --locked stellar-cli
 ```
 
 ### Build
@@ -41,7 +41,7 @@ cd soroban-crowdfunding
 cargo build
 
 # Build WASM (for deployment)
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 ```
 
 ### Test

@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, Address, Env, String, Symbol, Vec,
 };
@@ -16,8 +17,17 @@ fn project_key(round_id: u64, project_id: u64) -> (Symbol, u64, u64) {
     (symbol_short!("PROJ"), round_id, project_id)
 }
 
-fn contrib_key(round_id: u64, project_id: u64, contributor: &Address) -> (Symbol, u64, u64, Address) {
-    (symbol_short!("CONTRIB"), round_id, project_id, contributor.clone())
+fn contrib_key(
+    round_id: u64,
+    project_id: u64,
+    contributor: &Address,
+) -> (Symbol, u64, u64, Address) {
+    (
+        symbol_short!("CONTRIB"),
+        round_id,
+        project_id,
+        contributor.clone(),
+    )
 }
 
 fn proj_cnt_key(round_id: u64) -> (Symbol, u64) {
@@ -195,7 +205,13 @@ impl QuadraticContract {
     }
 
     /// Contribute to a project. First contribution per address increments contributor_count.
-    pub fn contribute(env: Env, contributor: Address, round_id: u64, project_id: u64, amount: i128) {
+    pub fn contribute(
+        env: Env,
+        contributor: Address,
+        round_id: u64,
+        project_id: u64,
+        amount: i128,
+    ) {
         contributor.require_auth();
         assert!(amount > 0, "amount must be positive");
 
@@ -224,16 +240,12 @@ impl QuadraticContract {
         );
 
         let ck = contrib_key(round_id, project_id, &contributor);
-        let mut rec: Contribution = env
-            .storage()
-            .persistent()
-            .get(&ck)
-            .unwrap_or(Contribution {
-                round_id,
-                project_id,
-                contributor: contributor.clone(),
-                amount: 0,
-            });
+        let mut rec: Contribution = env.storage().persistent().get(&ck).unwrap_or(Contribution {
+            round_id,
+            project_id,
+            contributor: contributor.clone(),
+            amount: 0,
+        });
 
         // First contribution → increment unique contributor count
         if rec.amount == 0 {
@@ -333,7 +345,12 @@ impl QuadraticContract {
             .expect("project not found")
     }
 
-    pub fn get_contribution(env: Env, round_id: u64, project_id: u64, contributor: Address) -> Contribution {
+    pub fn get_contribution(
+        env: Env,
+        round_id: u64,
+        project_id: u64,
+        contributor: Address,
+    ) -> Contribution {
         env.storage()
             .persistent()
             .get(&contrib_key(round_id, project_id, &contributor))
@@ -375,7 +392,9 @@ mod tests {
     #[test]
     fn full_round_lifecycle() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let tok = StellarAssetClient::new(&env, &token_addr);
 
         let owner1 = Address::generate(&env);
@@ -436,7 +455,9 @@ mod tests {
     #[test]
     fn contributor_count_unique_only() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
         let contributor = Address::generate(&env);
         StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);
