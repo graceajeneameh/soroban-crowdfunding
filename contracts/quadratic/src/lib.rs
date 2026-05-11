@@ -16,8 +16,17 @@ fn project_key(round_id: u64, project_id: u64) -> (Symbol, u64, u64) {
     (symbol_short!("PROJ"), round_id, project_id)
 }
 
-fn contrib_key(round_id: u64, project_id: u64, contributor: &Address) -> (Symbol, u64, u64, Address) {
-    (symbol_short!("CONTRIB"), round_id, project_id, contributor.clone())
+fn contrib_key(
+    round_id: u64,
+    project_id: u64,
+    contributor: &Address,
+) -> (Symbol, u64, u64, Address) {
+    (
+        symbol_short!("CONTRIB"),
+        round_id,
+        project_id,
+        contributor.clone(),
+    )
 }
 
 fn proj_cnt_key(round_id: u64) -> (Symbol, u64) {
@@ -28,45 +37,73 @@ fn proj_cnt_key(round_id: u64) -> (Symbol, u64) {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Lifecycle state for a quadratic funding round.
 pub enum RoundStatus {
+    /// Round accepts projects and contributions.
     Active,
+    /// Round matching has been calculated and paid out.
     Finalized,
+    /// Round was cancelled before finalization.
     Cancelled,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Stored metadata and funding state for a quadratic round.
 pub struct Round {
+    /// Sequential round identifier.
     pub id: u64,
+    /// Round administrator that can finalize the round.
     pub admin: Address,
+    /// Token used for contributions and matching payouts.
     pub token: Address,
+    /// Matching pool locked for the round.
     pub matching_pool: i128,
+    /// Human-readable round title.
     pub title: String,
+    /// Human-readable round description.
     pub description: String,
+    /// Ledger sequence when contributions open.
     pub start_ledger: u32,
+    /// Ledger sequence when contributions close.
     pub end_ledger: u32,
+    /// Current round lifecycle state.
     pub status: RoundStatus,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Project participating in a quadratic funding round.
 pub struct Project {
+    /// Project identifier scoped to a round.
     pub id: u64,
+    /// Round that owns this project.
     pub round_id: u64,
+    /// Address that receives project payouts.
     pub owner: Address,
+    /// Human-readable project title.
     pub title: String,
+    /// Human-readable project description.
     pub description: String,
+    /// Sum of direct contributions received by the project.
     pub total_contributions: i128,
+    /// Number of unique contributors.
     pub contributor_count: u32,
+    /// Matching amount assigned during finalization.
     pub matching_amount: i128,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Contribution accounting record for one contributor and project.
 pub struct Contribution {
+    /// Round that contains the contribution.
     pub round_id: u64,
+    /// Project that received the contribution.
     pub project_id: u64,
+    /// Contributor address.
     pub contributor: Address,
+    /// Total amount contributed by this address to the project.
     pub amount: i128,
 }
 
@@ -89,10 +126,16 @@ fn isqrt(n: i128) -> i128 {
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
+/// Quadratic funding round contract.
 pub struct QuadraticContract;
 
 #[contractimpl]
 impl QuadraticContract {
+    /// One-time initialisation for the quadratic funding contract admin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the contract was already initialized.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&ADMIN) {
             panic!("already initialized");
@@ -103,6 +146,11 @@ impl QuadraticContract {
     }
 
     /// Admin creates a round and locks the matching pool in the contract.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the admin is unauthorized, the matching pool is non-positive,
+    /// the ledger range is invalid, or the token transfer fails.
     pub fn create_round(
         env: Env,
         admin: Address,
@@ -148,6 +196,11 @@ impl QuadraticContract {
     }
 
     /// Register a project in an active round.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the owner is unauthorized, the round is missing, or the round
+    /// is not active.
     pub fn register_project(
         env: Env,
         round_id: u64,
@@ -195,7 +248,19 @@ impl QuadraticContract {
     }
 
     /// Contribute to a project. First contribution per address increments contributor_count.
-    pub fn contribute(env: Env, contributor: Address, round_id: u64, project_id: u64, amount: i128) {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the contributor is unauthorized, the amount is non-positive,
+    /// the round or project is missing, the round is inactive, the current
+    /// ledger is outside the round window, or the token transfer fails.
+    pub fn contribute(
+        env: Env,
+        contributor: Address,
+        round_id: u64,
+        project_id: u64,
+        amount: i128,
+    ) {
         contributor.require_auth();
         assert!(amount > 0, "amount must be positive");
 
@@ -224,16 +289,12 @@ impl QuadraticContract {
         );
 
         let ck = contrib_key(round_id, project_id, &contributor);
-        let mut rec: Contribution = env
-            .storage()
-            .persistent()
-            .get(&ck)
-            .unwrap_or(Contribution {
-                round_id,
-                project_id,
-                contributor: contributor.clone(),
-                amount: 0,
-            });
+        let mut rec: Contribution = env.storage().persistent().get(&ck).unwrap_or(Contribution {
+            round_id,
+            project_id,
+            contributor: contributor.clone(),
+            amount: 0,
+        });
 
         // First contribution → increment unique contributor count
         if rec.amount == 0 {
@@ -254,6 +315,11 @@ impl QuadraticContract {
     }
 
     /// Finalize the round: compute quadratic matching and pay out all projects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the round is missing, the admin is unauthorized, the round is
+    /// not active, any project id is missing, or a token transfer fails.
     pub fn finalize_round(env: Env, round_id: u64, project_ids: Vec<u64>) {
         let mut round: Round = env
             .storage()
@@ -319,6 +385,11 @@ impl QuadraticContract {
 
     // ── Views ─────────────────────────────────────────────────────────────────
 
+    /// Return a round by id.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the round does not exist.
     pub fn get_round(env: Env, round_id: u64) -> Round {
         env.storage()
             .persistent()
@@ -326,6 +397,11 @@ impl QuadraticContract {
             .expect("round not found")
     }
 
+    /// Return a project by round id and project id.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the project does not exist.
     pub fn get_project(env: Env, round_id: u64, project_id: u64) -> Project {
         env.storage()
             .persistent()
@@ -333,7 +409,17 @@ impl QuadraticContract {
             .expect("project not found")
     }
 
-    pub fn get_contribution(env: Env, round_id: u64, project_id: u64, contributor: Address) -> Contribution {
+    /// Return a contribution record for a contributor and project.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the contribution record does not exist.
+    pub fn get_contribution(
+        env: Env,
+        round_id: u64,
+        project_id: u64,
+        contributor: Address,
+    ) -> Contribution {
         env.storage()
             .persistent()
             .get(&contrib_key(round_id, project_id, &contributor))
@@ -375,7 +461,9 @@ mod tests {
     #[test]
     fn full_round_lifecycle() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let tok = StellarAssetClient::new(&env, &token_addr);
 
         let owner1 = Address::generate(&env);
@@ -436,7 +524,9 @@ mod tests {
     #[test]
     fn contributor_count_unique_only() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
         let contributor = Address::generate(&env);
         StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);

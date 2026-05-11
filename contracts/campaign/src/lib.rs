@@ -21,55 +21,87 @@ fn donation_key(campaign_id: u64, donor: &Address) -> (Symbol, u64, Address) {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Lifecycle state for a crowdfunding campaign.
 pub enum CampaignStatus {
+    /// Curated campaign is waiting for admin approval.
     Pending,
+    /// Campaign accepts donations.
     Active,
+    /// Campaign reached its funding goal.
     Successful,
+    /// Campaign expired before reaching its funding goal.
     Failed,
+    /// Campaign was cancelled before completion.
     Cancelled,
 }
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Approval model used when a campaign is created.
 pub enum CampaignType {
+    /// Campaign starts accepting donations immediately.
     Open,
+    /// Campaign requires admin approval before donations are allowed.
     Curated,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Stored campaign metadata and funding state.
 pub struct Campaign {
+    /// Sequential campaign identifier.
     pub id: u64,
+    /// Address that created the campaign and can withdraw successful funds.
     pub creator: Address,
+    /// Token accepted by the campaign.
     pub token: Address,
+    /// Target amount required for success.
     pub goal: i128,
+    /// Amount donated so far.
     pub raised: i128,
+    /// Human-readable campaign title.
     pub title: String,
+    /// Human-readable campaign description.
     pub description: String,
+    /// Campaign category label.
     pub category: String,
+    /// Campaign approval model.
     pub campaign_type: CampaignType,
+    /// Ledger sequence after which the campaign expires.
     pub deadline_ledger: u32,
+    /// Current lifecycle state.
     pub status: CampaignStatus,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Donation accounting record for a single donor and campaign.
 pub struct DonationRecord {
+    /// Campaign that received the donation.
     pub campaign_id: u64,
+    /// Donor address.
     pub donor: Address,
+    /// Current refundable donation amount.
     pub amount: i128,
+    /// Whether this donation has already been refunded.
     pub refunded: bool,
+    /// Ledger sequence of the most recent donation update.
     pub ledger: u32,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
+/// Crowdfunding campaign contract.
 pub struct CampaignContract;
 
 #[contractimpl]
 impl CampaignContract {
     /// One-time initialisation. Sets admin and platform fee in basis points.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the contract was already initialized.
     pub fn initialize(env: Env, admin: Address, fee_bps: u32) {
         if env.storage().instance().has(&ADMIN) {
             panic!("already initialized");
@@ -82,6 +114,11 @@ impl CampaignContract {
 
     /// Create a new campaign. Open campaigns become Active immediately;
     /// Curated campaigns start as Pending until admin approves.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the caller is not authorized, the goal is non-positive, or
+    /// the deadline is not in the future.
     pub fn create_campaign(
         env: Env,
         creator: Address,
@@ -131,6 +168,11 @@ impl CampaignContract {
     }
 
     /// Admin approves a Curated campaign → Active.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the admin is missing or unauthorized, the campaign is missing,
+    /// or the campaign is not pending.
     pub fn approve_campaign(env: Env, campaign_id: u64) {
         let admin: Address = env.storage().instance().get(&ADMIN).unwrap();
         admin.require_auth();
@@ -143,7 +185,9 @@ impl CampaignContract {
         assert!(c.status == CampaignStatus::Pending, "not pending");
 
         c.status = CampaignStatus::Active;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("approved")),
@@ -152,6 +196,11 @@ impl CampaignContract {
     }
 
     /// Creator or admin cancels a campaign that hasn't received donations.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the caller is unauthorized, the campaign is missing, the
+    /// campaign cannot be cancelled, or donations already exist.
     pub fn cancel_campaign(env: Env, caller: Address, campaign_id: u64) {
         caller.require_auth();
         let admin: Address = env.storage().instance().get(&ADMIN).unwrap();
@@ -161,10 +210,7 @@ impl CampaignContract {
             .get(&campaign_key(campaign_id))
             .expect("campaign not found");
 
-        assert!(
-            caller == c.creator || caller == admin,
-            "unauthorized"
-        );
+        assert!(caller == c.creator || caller == admin, "unauthorized");
         assert!(
             c.status == CampaignStatus::Pending || c.status == CampaignStatus::Active,
             "cannot cancel"
@@ -172,7 +218,9 @@ impl CampaignContract {
         assert!(c.raised == 0, "has donations; use refund flow");
 
         c.status = CampaignStatus::Cancelled;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("cancelled")),
@@ -182,6 +230,11 @@ impl CampaignContract {
 
     /// Donate to an Active campaign. Locks tokens in the contract.
     /// Auto-marks Successful when raised >= goal.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the donor is unauthorized, the amount is non-positive, the
+    /// campaign is missing, inactive, expired, or the token transfer fails.
     pub fn donate(env: Env, donor: Address, campaign_id: u64, amount: i128) {
         donor.require_auth();
         assert!(amount > 0, "amount must be positive");
@@ -205,17 +258,17 @@ impl CampaignContract {
 
         // Update or create donation record
         let key = donation_key(campaign_id, &donor);
-        let mut rec: DonationRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(DonationRecord {
-                campaign_id,
-                donor: donor.clone(),
-                amount: 0,
-                refunded: false,
-                ledger: env.ledger().sequence(),
-            });
+        let mut rec: DonationRecord =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(DonationRecord {
+                    campaign_id,
+                    donor: donor.clone(),
+                    amount: 0,
+                    refunded: false,
+                    ledger: env.ledger().sequence(),
+                });
         rec.amount += amount;
         rec.ledger = env.ledger().sequence();
         env.storage().persistent().set(&key, &rec);
@@ -228,7 +281,9 @@ impl CampaignContract {
                 campaign_id,
             );
         }
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("donated")),
@@ -237,6 +292,11 @@ impl CampaignContract {
     }
 
     /// Creator withdraws from a Successful campaign. Platform fee goes to admin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the campaign is missing, the creator is unauthorized, the
+    /// campaign is not successful, or a token transfer fails.
     pub fn withdraw(env: Env, campaign_id: u64) {
         let mut c: Campaign = env
             .storage()
@@ -258,7 +318,9 @@ impl CampaignContract {
         tok.transfer(&env.current_contract_address(), &c.creator, &payout);
 
         c.raised = 0;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("withdraw")),
@@ -267,6 +329,11 @@ impl CampaignContract {
     }
 
     /// Mark a campaign Failed after deadline if goal not reached.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the campaign is missing, not active, before its deadline, or
+    /// already reached its goal.
     pub fn mark_failed(env: Env, campaign_id: u64) {
         let mut c: Campaign = env
             .storage()
@@ -281,7 +348,9 @@ impl CampaignContract {
         assert!(c.raised < c.goal, "goal was reached");
 
         c.status = CampaignStatus::Failed;
-        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+        env.storage()
+            .persistent()
+            .set(&campaign_key(campaign_id), &c);
 
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("failed")),
@@ -290,6 +359,12 @@ impl CampaignContract {
     }
 
     /// Donor reclaims their contribution from a Failed or Cancelled campaign.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the donor is unauthorized, the campaign or donation record is
+    /// missing, the campaign is not refundable, the donation was already
+    /// refunded, or the token transfer fails.
     pub fn refund(env: Env, donor: Address, campaign_id: u64) {
         donor.require_auth();
         let c: Campaign = env
@@ -331,6 +406,11 @@ impl CampaignContract {
 
     // ── Views ────────────────────────────────────────────────────────────────
 
+    /// Return a campaign by id.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the campaign does not exist.
     pub fn get_campaign(env: Env, campaign_id: u64) -> Campaign {
         env.storage()
             .persistent()
@@ -338,6 +418,11 @@ impl CampaignContract {
             .expect("campaign not found")
     }
 
+    /// Return a donor's donation record for a campaign.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the donation record does not exist.
     pub fn get_donation(env: Env, campaign_id: u64, donor: Address) -> DonationRecord {
         env.storage()
             .persistent()
@@ -357,7 +442,13 @@ mod tests {
         Env, String,
     };
 
-    fn setup() -> (Env, CampaignContractClient<'static>, Address, Address, Address) {
+    fn setup() -> (
+        Env,
+        CampaignContractClient<'static>,
+        Address,
+        Address,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CampaignContract);
