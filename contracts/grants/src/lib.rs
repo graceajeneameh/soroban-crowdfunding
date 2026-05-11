@@ -16,53 +16,85 @@ fn grant_key(id: u64) -> (Symbol, u64) {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Lifecycle state for a grant.
 pub enum GrantStatus {
+    /// Grant is active and can process milestone submissions.
     Active,
+    /// Every milestone has been approved and paid.
     Completed,
+    /// Grant was revoked before all funds were disbursed.
     Revoked,
 }
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Review state for an individual grant milestone.
 pub enum MilestoneStatus {
+    /// Milestone has not been submitted yet.
     Pending,
+    /// Grantee submitted evidence for review.
     Submitted,
+    /// Grantor approved the milestone and released funds.
     Approved,
+    /// Grantor rejected the submitted evidence.
     Rejected,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// A payable unit of work inside a grant.
 pub struct Milestone {
+    /// Position of the milestone in the grant.
     pub index: u32,
+    /// Human-readable milestone description.
     pub description: String,
+    /// Token amount released when this milestone is approved.
     pub amount: i128,
+    /// Evidence URI or text submitted by the grantee.
     pub evidence: String,
+    /// Current review state.
     pub status: MilestoneStatus,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Stored grant metadata, escrowed amount, and milestone state.
 pub struct Grant {
+    /// Sequential grant identifier.
     pub id: u64,
+    /// Address that funds and reviews the grant.
     pub grantor: Address,
+    /// Address that completes milestones and receives payouts.
     pub grantee: Address,
+    /// Token escrowed for this grant.
     pub token: Address,
+    /// Total amount locked when the grant is created.
     pub total_amount: i128,
+    /// Amount already released to the grantee.
     pub disbursed_amount: i128,
+    /// Human-readable grant title.
     pub title: String,
+    /// Human-readable grant description.
     pub description: String,
+    /// Ordered list of grant milestones.
     pub milestones: Vec<Milestone>,
+    /// Current grant lifecycle state.
     pub status: GrantStatus,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
+/// Milestone-based grant escrow contract.
 pub struct GrantsContract;
 
 #[contractimpl]
 impl GrantsContract {
+    /// One-time initialisation for the grant contract admin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the contract was already initialized.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&ADMIN) {
             panic!("already initialized");
@@ -73,6 +105,11 @@ impl GrantsContract {
     }
 
     /// Grantor creates a grant and locks the full amount in the contract.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the grantor is unauthorized, no milestones are provided, the
+    /// total milestone amount is non-positive, or the token transfer fails.
     pub fn create_grant(
         env: Env,
         grantor: Address,
@@ -120,6 +157,12 @@ impl GrantsContract {
     }
 
     /// Grantee submits evidence for a specific milestone.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the grant is missing, the grantee is unauthorized, the grant
+    /// is not active, the milestone index is invalid, or the milestone cannot
+    /// currently be submitted.
     pub fn submit_milestone(env: Env, grant_id: u64, milestone_index: u32, evidence: String) {
         let mut g: Grant = env
             .storage()
@@ -149,6 +192,12 @@ impl GrantsContract {
     }
 
     /// Grantor approves a submitted milestone and releases its funds to grantee.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the grant is missing, the grantor is unauthorized, the grant
+    /// is not active, the milestone index is invalid, the milestone was not
+    /// submitted, or the token transfer fails.
     pub fn approve_milestone(env: Env, grant_id: u64, milestone_index: u32) {
         let mut g: Grant = env
             .storage()
@@ -196,6 +245,12 @@ impl GrantsContract {
     }
 
     /// Grantor rejects a submitted milestone; resets to Pending with evidence cleared.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the grant is missing, the grantor is unauthorized, the grant
+    /// is not active, the milestone index is invalid, or the milestone was not
+    /// submitted.
     pub fn reject_milestone(env: Env, grant_id: u64, milestone_index: u32) {
         let mut g: Grant = env
             .storage()
@@ -222,6 +277,11 @@ impl GrantsContract {
     }
 
     /// Grantor revokes an active grant and reclaims undisbursed funds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the grant is missing, the grantor is unauthorized, the grant
+    /// is not active, or the refund transfer fails.
     pub fn revoke_grant(env: Env, grant_id: u64) {
         let mut g: Grant = env
             .storage()
@@ -251,6 +311,11 @@ impl GrantsContract {
 
     // ── Views ─────────────────────────────────────────────────────────────────
 
+    /// Return a grant by id.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the grant does not exist.
     pub fn get_grant(env: Env, grant_id: u64) -> Grant {
         env.storage()
             .persistent()
@@ -270,7 +335,13 @@ mod tests {
         Env, String, Vec,
     };
 
-    fn setup() -> (Env, GrantsContractClient<'static>, Address, Address, Address) {
+    fn setup() -> (
+        Env,
+        GrantsContractClient<'static>,
+        Address,
+        Address,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
         let id = env.register_contract(None, GrantsContract);
@@ -304,7 +375,9 @@ mod tests {
     #[test]
     fn full_grant_lifecycle() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&grantor, &1_000);
 
         let milestones = make_milestones(&env);
@@ -330,7 +403,9 @@ mod tests {
     #[test]
     fn reject_then_resubmit() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&grantor, &300);
 
         let mut milestones = Vec::new(&env);
@@ -363,7 +438,9 @@ mod tests {
     #[test]
     fn revoke_reclaims_undisbursed() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&grantor, &1_000);
 
         let milestones = make_milestones(&env);
