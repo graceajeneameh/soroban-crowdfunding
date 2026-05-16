@@ -17,6 +17,10 @@ fn donation_key(campaign_id: u64, donor: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("DON"), campaign_id, donor.clone())
 }
 
+fn update_key(campaign_id: u64, update_index: u64) -> (Symbol, u64, u64) {
+    (symbol_short!("UPDATE"), campaign_id, update_index)
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -50,6 +54,7 @@ pub struct Campaign {
     pub campaign_type: CampaignType,
     pub deadline_ledger: u32,
     pub status: CampaignStatus,
+    pub update_count: u64,
 }
 
 #[contracttype]
@@ -59,6 +64,15 @@ pub struct DonationRecord {
     pub donor: Address,
     pub amount: i128,
     pub refunded: bool,
+    pub ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct CampaignUpdate {
+    pub campaign_id: u64,
+    pub author: Address,
+    pub message: String,
     pub ledger: u32,
 }
 
@@ -118,6 +132,7 @@ impl CampaignContract {
             campaign_type,
             deadline_ledger,
             status: status.clone(),
+            update_count: 0,
         };
 
         env.storage().persistent().set(&campaign_key(id), &campaign);
@@ -236,6 +251,43 @@ impl CampaignContract {
         );
     }
 
+    /// Creator posts a campaign progress update while the campaign is live or successful.
+    pub fn post_update(env: Env, caller: Address, campaign_id: u64, message: String) {
+        caller.require_auth();
+
+        let mut c: Campaign = env
+            .storage()
+            .persistent()
+            .get(&campaign_key(campaign_id))
+            .expect("campaign not found");
+
+        assert!(caller == c.creator, "creator only");
+        assert!(
+            c.status == CampaignStatus::Active || c.status == CampaignStatus::Successful,
+            "updates closed"
+        );
+
+        let update_index = c.update_count;
+        let update = CampaignUpdate {
+            campaign_id,
+            author: caller,
+            message,
+            ledger: env.ledger().sequence(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&update_key(campaign_id, update_index), &update);
+
+        c.update_count += 1;
+        env.storage().persistent().set(&campaign_key(campaign_id), &c);
+
+        env.events().publish(
+            (symbol_short!("campaign"), symbol_short!("update")),
+            (campaign_id, update_index),
+        );
+    }
+
     /// Creator withdraws from a Successful campaign. Platform fee goes to admin.
     pub fn withdraw(env: Env, campaign_id: u64) {
         let mut c: Campaign = env
@@ -344,6 +396,13 @@ impl CampaignContract {
             .get(&donation_key(campaign_id, &donor))
             .expect("donation not found")
     }
+
+    pub fn get_update(env: Env, campaign_id: u64, index: u64) -> CampaignUpdate {
+        env.storage()
+            .persistent()
+            .get(&update_key(campaign_id, index))
+            .expect("update not found")
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -451,5 +510,64 @@ mod tests {
         client.mark_failed(&id);
         client.refund(&donor, &id);
         assert_eq!(TokenClient::new(&env, &token).balance(&donor), 200);
+    }
+
+    #[test]
+    fn creator_can_post_and_get_campaign_updates() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+        mint(&env, &token, &admin, &donor, 500);
+
+        let deadline = env.ledger().sequence() + 100;
+        let id = client.create_campaign(
+            &creator,
+            &token,
+            &500i128,
+            &String::from_str(&env, "Updates"),
+            &String::from_str(&env, "Desc"),
+            &String::from_str(&env, "Tech"),
+            &CampaignType::Open,
+            &deadline,
+        );
+
+        client.post_update(
+            &creator,
+            &id,
+            &String::from_str(&env, "First milestone"),
+        );
+        let update = client.get_update(&id, &0u64);
+        assert_eq!(update.campaign_id, id);
+        assert_eq!(update.author, creator);
+        assert_eq!(update.message, String::from_str(&env, "First milestone"));
+        assert_eq!(client.get_campaign(&id).update_count, 1);
+
+        client.donate(&donor, &id, &500i128);
+        assert_eq!(client.get_campaign(&id).status, CampaignStatus::Successful);
+
+        client.post_update(&creator, &id, &String::from_str(&env, "Goal reached"));
+        let update = client.get_update(&id, &1u64);
+        assert_eq!(update.message, String::from_str(&env, "Goal reached"));
+        assert_eq!(client.get_campaign(&id).update_count, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "creator only")]
+    fn non_creator_cannot_post_campaign_update() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+
+        let deadline = env.ledger().sequence() + 100;
+        let id = client.create_campaign(
+            &creator,
+            &token,
+            &100i128,
+            &String::from_str(&env, "Updates"),
+            &String::from_str(&env, "Desc"),
+            &String::from_str(&env, "Tech"),
+            &CampaignType::Open,
+            &deadline,
+        );
+
+        client.post_update(&donor, &id, &String::from_str(&env, "Not allowed"));
     }
 }
