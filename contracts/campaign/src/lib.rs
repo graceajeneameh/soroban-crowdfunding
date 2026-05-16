@@ -352,12 +352,18 @@ impl CampaignContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
+        testutils::{Address as _, Events as _, Ledger},
         token::{Client as TokenClient, StellarAssetClient},
-        Env, String,
+        Env, IntoVal, String, Symbol, Val,
     };
 
     fn setup() -> (Env, CampaignContractClient<'static>, Address, Address, Address) {
+        setup_with_fee(250)
+    }
+
+    fn setup_with_fee(
+        fee_bps: u32,
+    ) -> (Env, CampaignContractClient<'static>, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CampaignContract);
@@ -365,7 +371,7 @@ mod tests {
         let admin = Address::generate(&env);
         let creator = Address::generate(&env);
         let donor = Address::generate(&env);
-        client.initialize(&admin, &250u32); // 2.5% fee
+        client.initialize(&admin, &fee_bps);
         (env, client, admin, creator, donor)
     }
 
@@ -379,6 +385,41 @@ mod tests {
         let _ = admin;
     }
 
+    fn create_open_campaign(
+        env: &Env,
+        client: &CampaignContractClient<'static>,
+        creator: &Address,
+        token: &Address,
+        goal: i128,
+        deadline: u32,
+    ) -> u64 {
+        client.create_campaign(
+            creator,
+            token,
+            &goal,
+            &String::from_str(env, "Campaign"),
+            &String::from_str(env, "Desc"),
+            &String::from_str(env, "Tech"),
+            &CampaignType::Open,
+            &deadline,
+        )
+    }
+
+    fn assert_campaign_event(env: &Env, name: Symbol, expected_data: Val) {
+        let expected_topics: soroban_sdk::Vec<Val> =
+            (symbol_short!("campaign"), name).into_val(env);
+        let mut found = false;
+
+        for (_, topics, data) in env.events().all().iter() {
+            if topics == expected_topics && data == expected_data {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found, "expected campaign event was not emitted");
+    }
+
     #[test]
     fn open_campaign_full_lifecycle() {
         let (env, client, admin, creator, donor) = setup();
@@ -386,28 +427,35 @@ mod tests {
         mint(&env, &token, &admin, &donor, 1_000);
 
         let deadline = env.ledger().sequence() + 100;
-        let id = client.create_campaign(
-            &creator,
-            &token,
-            &500i128,
-            &String::from_str(&env, "Test"),
-            &String::from_str(&env, "Desc"),
-            &String::from_str(&env, "Tech"),
-            &CampaignType::Open,
-            &deadline,
+        let id = create_open_campaign(&env, &client, &creator, &token, 500, deadline);
+        assert_campaign_event(
+            &env,
+            symbol_short!("created"),
+            (id, creator.clone(), CampaignStatus::Active).into_val(&env),
         );
 
         let c = client.get_campaign(&id);
         assert_eq!(c.status, CampaignStatus::Active);
 
         client.donate(&donor, &id, &500i128);
+        assert_campaign_event(
+            &env,
+            symbol_short!("donated"),
+            (id, donor.clone(), 500i128).into_val(&env),
+        );
+        assert_campaign_event(&env, symbol_short!("success"), id.into_val(&env));
         let c = client.get_campaign(&id);
         assert_eq!(c.status, CampaignStatus::Successful);
 
         client.withdraw(&id);
+        assert_campaign_event(
+            &env,
+            symbol_short!("withdraw"),
+            (id, 488i128, 12i128).into_val(&env),
+        );
         let tok = TokenClient::new(&env, &token);
-        // creator receives 500 - 2.5% fee = 487 (rounded down)
-        assert!(tok.balance(&creator) >= 487);
+        assert_eq!(tok.balance(&creator), 488);
+        assert_eq!(tok.balance(&admin), 12);
     }
 
     #[test]
@@ -425,8 +473,14 @@ mod tests {
             &CampaignType::Curated,
             &deadline,
         );
+        assert_campaign_event(
+            &env,
+            symbol_short!("created"),
+            (id, creator.clone(), CampaignStatus::Pending).into_val(&env),
+        );
         assert_eq!(client.get_campaign(&id).status, CampaignStatus::Pending);
         client.approve_campaign(&id);
+        assert_campaign_event(&env, symbol_short!("approved"), id.into_val(&env));
         assert_eq!(client.get_campaign(&id).status, CampaignStatus::Active);
     }
 
@@ -449,7 +503,175 @@ mod tests {
         client.donate(&donor, &id, &200i128);
         env.ledger().with_mut(|l| l.sequence_number += 10);
         client.mark_failed(&id);
+        assert_campaign_event(&env, symbol_short!("failed"), id.into_val(&env));
         client.refund(&donor, &id);
+        assert_campaign_event(
+            &env,
+            symbol_short!("refunded"),
+            (id, donor.clone(), 200i128).into_val(&env),
+        );
         assert_eq!(TokenClient::new(&env, &token).balance(&donor), 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "goal must be positive")]
+    fn create_campaign_rejects_zero_goal() {
+        let (env, client, admin, creator, _donor) = setup();
+        let token = make_token(&env, &admin);
+        let deadline = env.ledger().sequence() + 100;
+
+        create_open_campaign(&env, &client, &creator, &token, 0, deadline);
+    }
+
+    #[test]
+    #[should_panic(expected = "goal must be positive")]
+    fn create_campaign_rejects_negative_goal() {
+        let (env, client, admin, creator, _donor) = setup();
+        let token = make_token(&env, &admin);
+        let deadline = env.ledger().sequence() + 100;
+
+        create_open_campaign(&env, &client, &creator, &token, -1, deadline);
+    }
+
+    #[test]
+    #[should_panic(expected = "deadline must be in the future")]
+    fn create_campaign_rejects_past_deadline() {
+        let (env, client, admin, creator, _donor) = setup();
+        let token = make_token(&env, &admin);
+        let deadline = env.ledger().sequence();
+
+        create_open_campaign(&env, &client, &creator, &token, 100, deadline);
+    }
+
+    #[test]
+    #[should_panic(expected = "campaign not active")]
+    fn donate_rejects_pending_curated_campaign() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+        mint(&env, &token, &admin, &donor, 100);
+        let deadline = env.ledger().sequence() + 100;
+        let id = client.create_campaign(
+            &creator,
+            &token,
+            &100i128,
+            &String::from_str(&env, "Curated"),
+            &String::from_str(&env, "Desc"),
+            &String::from_str(&env, "Art"),
+            &CampaignType::Curated,
+            &deadline,
+        );
+
+        client.donate(&donor, &id, &100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "campaign expired")]
+    fn donate_rejects_after_deadline() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+        mint(&env, &token, &admin, &donor, 100);
+        let deadline = env.ledger().sequence() + 1;
+        let id = create_open_campaign(&env, &client, &creator, &token, 100, deadline);
+        env.ledger().with_mut(|l| l.sequence_number += 2);
+
+        client.donate(&donor, &id, &100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "not successful")]
+    fn withdraw_rejects_non_successful_campaign() {
+        let (env, client, admin, creator, _donor) = setup();
+        let token = make_token(&env, &admin);
+        let deadline = env.ledger().sequence() + 100;
+        let id = create_open_campaign(&env, &client, &creator, &token, 100, deadline);
+
+        client.withdraw(&id);
+    }
+
+    #[test]
+    #[should_panic(expected = "deadline not passed")]
+    fn mark_failed_rejects_before_deadline() {
+        let (env, client, admin, creator, _donor) = setup();
+        let token = make_token(&env, &admin);
+        let deadline = env.ledger().sequence() + 100;
+        let id = create_open_campaign(&env, &client, &creator, &token, 100, deadline);
+
+        client.mark_failed(&id);
+    }
+
+    #[test]
+    #[should_panic(expected = "not active")]
+    fn mark_failed_rejects_successful_campaign() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+        mint(&env, &token, &admin, &donor, 100);
+        let deadline = env.ledger().sequence() + 5;
+        let id = create_open_campaign(&env, &client, &creator, &token, 100, deadline);
+        client.donate(&donor, &id, &100i128);
+        env.ledger().with_mut(|l| l.sequence_number += 10);
+
+        client.mark_failed(&id);
+    }
+
+    #[test]
+    #[should_panic(expected = "already refunded")]
+    fn refund_rejects_double_claim() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+        mint(&env, &token, &admin, &donor, 200);
+        let deadline = env.ledger().sequence() + 5;
+        let id = create_open_campaign(&env, &client, &creator, &token, 1_000, deadline);
+        client.donate(&donor, &id, &200i128);
+        env.ledger().with_mut(|l| l.sequence_number += 10);
+        client.mark_failed(&id);
+        client.refund(&donor, &id);
+
+        client.refund(&donor, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "has donations; use refund flow")]
+    fn cancel_campaign_rejects_existing_donations() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+        mint(&env, &token, &admin, &donor, 100);
+        let deadline = env.ledger().sequence() + 100;
+        let id = create_open_campaign(&env, &client, &creator, &token, 500, deadline);
+        client.donate(&donor, &id, &100i128);
+
+        client.cancel_campaign(&creator, &id);
+    }
+
+    #[test]
+    fn cancel_campaign_emits_event() {
+        let (env, client, admin, creator, _donor) = setup();
+        let token = make_token(&env, &admin);
+        let deadline = env.ledger().sequence() + 100;
+        let id = create_open_campaign(&env, &client, &creator, &token, 500, deadline);
+
+        client.cancel_campaign(&creator, &id);
+
+        assert_eq!(client.get_campaign(&id).status, CampaignStatus::Cancelled);
+        assert_campaign_event(&env, symbol_short!("cancelled"), id.into_val(&env));
+    }
+
+    #[test]
+    fn platform_fee_calculation_matches_basis_points() {
+        for (fee_bps, expected_fee, expected_payout) in
+            [(0u32, 0i128, 1_000i128), (250, 25, 975), (1_000, 100, 900)]
+        {
+            let (env, client, admin, creator, donor) = setup_with_fee(fee_bps);
+            let token = make_token(&env, &admin);
+            mint(&env, &token, &admin, &donor, 1_000);
+            let deadline = env.ledger().sequence() + 100;
+            let id = create_open_campaign(&env, &client, &creator, &token, 1_000, deadline);
+
+            client.donate(&donor, &id, &1_000i128);
+            client.withdraw(&id);
+
+            let tok = TokenClient::new(&env, &token);
+            assert_eq!(tok.balance(&creator), expected_payout);
+            assert_eq!(tok.balance(&admin), expected_fee);
+        }
     }
 }
