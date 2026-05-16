@@ -12,11 +12,16 @@ fn grant_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("GRANT"), id)
 }
 
+fn application_key(grant_id: u64, applicant: &Address) -> (Symbol, u64, Address) {
+    (symbol_short!("APP"), grant_id, applicant.clone())
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
 pub enum GrantStatus {
+    Open,
     Active,
     Completed,
     Revoked,
@@ -28,6 +33,14 @@ pub enum MilestoneStatus {
     Pending,
     Submitted,
     Approved,
+    Rejected,
+}
+
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ApplicationStatus {
+    Applied,
+    Accepted,
     Rejected,
 }
 
@@ -54,6 +67,15 @@ pub struct Grant {
     pub description: String,
     pub milestones: Vec<Milestone>,
     pub status: GrantStatus,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct GrantApplication {
+    pub grant_id: u64,
+    pub applicant: Address,
+    pub proposal: String,
+    pub status: ApplicationStatus,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -117,6 +139,121 @@ impl GrantsContract {
             (id, grantor, grantee, total),
         );
         id
+    }
+
+    /// Grantor opens a grant for applications without locking funds yet.
+    pub fn open_grant(
+        env: Env,
+        grantor: Address,
+        token: Address,
+        total_amount: i128,
+        title: String,
+        description: String,
+        milestones: Vec<Milestone>,
+    ) -> u64 {
+        grantor.require_auth();
+        assert!(total_amount > 0, "total must be positive");
+        assert!(!milestones.is_empty(), "need at least one milestone");
+
+        let milestone_total: i128 = milestones.iter().map(|m| m.amount).sum();
+        assert!(
+            milestone_total == total_amount,
+            "milestone total mismatch"
+        );
+
+        let id: u64 = env.storage().instance().get(&GRANT_CNT).unwrap_or(0);
+        let grant = Grant {
+            id,
+            grantor: grantor.clone(),
+            grantee: grantor.clone(),
+            token,
+            total_amount,
+            disbursed_amount: 0,
+            title,
+            description,
+            milestones,
+            status: GrantStatus::Open,
+        };
+
+        env.storage().persistent().set(&grant_key(id), &grant);
+        env.storage().instance().set(&GRANT_CNT, &(id + 1));
+
+        env.events().publish(
+            (symbol_short!("grant"), symbol_short!("opened")),
+            (id, grantor, total_amount),
+        );
+        id
+    }
+
+    /// Applicant submits a proposal for an open grant.
+    pub fn apply_for_grant(env: Env, applicant: Address, grant_id: u64, proposal: String) {
+        applicant.require_auth();
+
+        let g: Grant = env
+            .storage()
+            .persistent()
+            .get(&grant_key(grant_id))
+            .expect("grant not found");
+        assert!(g.status == GrantStatus::Open, "grant not open");
+
+        let key = application_key(grant_id, &applicant);
+        assert!(
+            !env.storage().persistent().has(&key),
+            "application exists"
+        );
+
+        let application = GrantApplication {
+            grant_id,
+            applicant: applicant.clone(),
+            proposal,
+            status: ApplicationStatus::Applied,
+        };
+        env.storage().persistent().set(&key, &application);
+
+        env.events().publish(
+            (symbol_short!("grant"), symbol_short!("applied")),
+            (grant_id, applicant),
+        );
+    }
+
+    /// Grantor accepts an applicant, locks grant funds, and activates the grant.
+    pub fn accept_application(env: Env, grant_id: u64, applicant: Address) {
+        let mut g: Grant = env
+            .storage()
+            .persistent()
+            .get(&grant_key(grant_id))
+            .expect("grant not found");
+        g.grantor.require_auth();
+        assert!(g.status == GrantStatus::Open, "grant not open");
+
+        let key = application_key(grant_id, &applicant);
+        let mut application: GrantApplication = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("application not found");
+        assert!(
+            application.status == ApplicationStatus::Applied,
+            "application not active"
+        );
+
+        token::Client::new(&env, &g.token).transfer(
+            &g.grantor,
+            &env.current_contract_address(),
+            &g.total_amount,
+        );
+
+        application.status = ApplicationStatus::Accepted;
+        env.storage().persistent().set(&key, &application);
+
+        g.grantee = applicant.clone();
+        g.status = GrantStatus::Active;
+        env.storage().persistent().set(&grant_key(grant_id), &g);
+
+        env.events().publish(
+            (symbol_short!("grant"), symbol_short!("accepted")),
+            (grant_id, applicant, g.total_amount),
+        );
     }
 
     /// Grantee submits evidence for a specific milestone.
@@ -257,6 +394,13 @@ impl GrantsContract {
             .get(&grant_key(grant_id))
             .expect("grant not found")
     }
+
+    pub fn get_application(env: Env, grant_id: u64, applicant: Address) -> GrantApplication {
+        env.storage()
+            .persistent()
+            .get(&application_key(grant_id, &applicant))
+            .expect("application not found")
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -383,5 +527,54 @@ mod tests {
         // grantor gets back 700
         assert_eq!(TokenClient::new(&env, &token_addr).balance(&grantor), 700);
         assert_eq!(client.get_grant(&id).status, GrantStatus::Revoked);
+    }
+
+    #[test]
+    fn open_grant_accepts_application_and_activates_lifecycle() {
+        let (env, client, admin, grantor, grantee) = setup();
+        let second_applicant = Address::generate(&env);
+        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        StellarAssetClient::new(&env, &token_addr).mint(&grantor, &1_000);
+
+        let milestones = make_milestones(&env);
+        let grant_id = client.open_grant(
+            &grantor,
+            &token_addr,
+            &1_000i128,
+            &String::from_str(&env, "Open grant"),
+            &String::from_str(&env, "Apply to build"),
+            &milestones,
+        );
+
+        assert_eq!(client.get_grant(&grant_id).status, GrantStatus::Open);
+        assert_eq!(TokenClient::new(&env, &token_addr).balance(&grantor), 1_000);
+
+        client.apply_for_grant(&grantee, &grant_id, &String::from_str(&env, "Proposal A"));
+        client.apply_for_grant(
+            &second_applicant,
+            &grant_id,
+            &String::from_str(&env, "Proposal B"),
+        );
+
+        let application = client.get_application(&grant_id, &second_applicant);
+        assert_eq!(application.grant_id, grant_id);
+        assert_eq!(application.applicant, second_applicant);
+        assert_eq!(application.status, ApplicationStatus::Applied);
+
+        client.accept_application(&grant_id, &application.applicant);
+        let accepted = client.get_application(&grant_id, &application.applicant);
+        assert_eq!(accepted.status, ApplicationStatus::Accepted);
+
+        let grant = client.get_grant(&grant_id);
+        assert_eq!(grant.status, GrantStatus::Active);
+        assert_eq!(grant.grantee, application.applicant);
+        assert_eq!(TokenClient::new(&env, &token_addr).balance(&grantor), 0);
+
+        client.submit_milestone(&grant_id, &0u32, &String::from_str(&env, "proof1"));
+        client.approve_milestone(&grant_id, &0u32);
+        assert_eq!(
+            TokenClient::new(&env, &token_addr).balance(&accepted.applicant),
+            300
+        );
     }
 }
