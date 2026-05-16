@@ -17,6 +17,14 @@ fn donation_key(campaign_id: u64, donor: &Address) -> (Symbol, u64, Address) {
     (symbol_short!("DON"), campaign_id, donor.clone())
 }
 
+fn donor_stats_key(donor: &Address) -> (Symbol, Address) {
+    (symbol_short!("DSTATS"), donor.clone())
+}
+
+fn donor_campaigns_key(donor: &Address) -> (Symbol, Address) {
+    (symbol_short!("DCAMPS"), donor.clone())
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -60,6 +68,14 @@ pub struct DonationRecord {
     pub amount: i128,
     pub refunded: bool,
     pub ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct DonorStats {
+    pub donor: Address,
+    pub total_donated: i128,
+    pub campaign_count: u32,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -220,6 +236,31 @@ impl CampaignContract {
         rec.ledger = env.ledger().sequence();
         env.storage().persistent().set(&key, &rec);
 
+        let campaigns_key = donor_campaigns_key(&donor);
+        let mut campaigns: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&campaigns_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        if !contains_campaign(&campaigns, campaign_id) {
+            campaigns.push_back(campaign_id);
+        }
+        env.storage().persistent().set(&campaigns_key, &campaigns);
+
+        let stats_key = donor_stats_key(&donor);
+        let mut stats: DonorStats =
+            env.storage()
+                .persistent()
+                .get(&stats_key)
+                .unwrap_or(DonorStats {
+                    donor: donor.clone(),
+                    total_donated: 0,
+                    campaign_count: 0,
+                });
+        stats.total_donated += amount;
+        stats.campaign_count = campaigns.len();
+        env.storage().persistent().set(&stats_key, &stats);
+
         c.raised += amount;
         if c.raised >= c.goal {
             c.status = CampaignStatus::Successful;
@@ -233,6 +274,11 @@ impl CampaignContract {
         env.events().publish(
             (symbol_short!("campaign"), symbol_short!("donated")),
             (campaign_id, donor, amount),
+        );
+
+        env.events().publish(
+            (symbol_short!("campaign"), Symbol::new(&env, "donor_stats")),
+            (campaign_id, stats.donor, stats.total_donated, stats.campaign_count),
         );
     }
 
@@ -344,6 +390,36 @@ impl CampaignContract {
             .get(&donation_key(campaign_id, &donor))
             .expect("donation not found")
     }
+
+    pub fn get_donor_stats(env: Env, donor: Address) -> DonorStats {
+        env.storage()
+            .persistent()
+            .get(&donor_stats_key(&donor))
+            .unwrap_or(DonorStats {
+                donor,
+                total_donated: 0,
+                campaign_count: 0,
+            })
+    }
+
+    pub fn get_donor_campaigns(env: Env, donor: Address) -> soroban_sdk::Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&donor_campaigns_key(&donor))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+}
+
+fn contains_campaign(campaigns: &soroban_sdk::Vec<u64>, campaign_id: u64) -> bool {
+    let mut index = 0;
+    while index < campaigns.len() {
+        if campaigns.get(index).unwrap() == campaign_id {
+            return true;
+        }
+        index += 1;
+    }
+
+    false
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -451,5 +527,48 @@ mod tests {
         client.mark_failed(&id);
         client.refund(&donor, &id);
         assert_eq!(TokenClient::new(&env, &token).balance(&donor), 200);
+    }
+
+    #[test]
+    fn donor_stats_accumulate_across_campaigns_with_deduped_campaigns() {
+        let (env, client, admin, creator, donor) = setup();
+        let token = make_token(&env, &admin);
+        mint(&env, &token, &admin, &donor, 1_000);
+
+        let deadline = env.ledger().sequence() + 100;
+        let first_id = client.create_campaign(
+            &creator,
+            &token,
+            &1_000i128,
+            &String::from_str(&env, "First"),
+            &String::from_str(&env, "Desc"),
+            &String::from_str(&env, "Tech"),
+            &CampaignType::Open,
+            &deadline,
+        );
+        let second_id = client.create_campaign(
+            &creator,
+            &token,
+            &1_000i128,
+            &String::from_str(&env, "Second"),
+            &String::from_str(&env, "Desc"),
+            &String::from_str(&env, "Tech"),
+            &CampaignType::Open,
+            &deadline,
+        );
+
+        client.donate(&donor, &first_id, &100i128);
+        client.donate(&donor, &first_id, &50i128);
+        client.donate(&donor, &second_id, &75i128);
+
+        let stats = client.get_donor_stats(&donor);
+        assert_eq!(stats.donor, donor);
+        assert_eq!(stats.total_donated, 225);
+        assert_eq!(stats.campaign_count, 2);
+
+        let campaigns = client.get_donor_campaigns(&stats.donor);
+        assert_eq!(campaigns.len(), 2);
+        assert_eq!(campaigns.get(0).unwrap(), first_id);
+        assert_eq!(campaigns.get(1).unwrap(), second_id);
     }
 }
