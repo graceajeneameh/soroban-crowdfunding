@@ -347,9 +347,9 @@ impl QuadraticContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::Address as _,
+        testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
         token::{Client as TokenClient, StellarAssetClient},
-        Env, String, Vec,
+        Env, IntoVal, String, Symbol, Val, Vec,
     };
 
     fn setup() -> (Env, QuadraticContractClient<'static>, Address) {
@@ -362,6 +362,70 @@ mod tests {
         (env, client, admin)
     }
 
+    fn make_token(env: &Env, admin: &Address) -> Address {
+        env.register_stellar_asset_contract_v2(admin.clone()).address()
+    }
+
+    fn mint(env: &Env, token: &Address, to: &Address, amount: i128) {
+        StellarAssetClient::new(env, token).mint(to, &amount);
+    }
+
+    fn create_round(
+        env: &Env,
+        client: &QuadraticContractClient<'static>,
+        admin: &Address,
+        token_addr: &Address,
+        matching_pool: i128,
+        start_ledger: u32,
+        end_ledger: u32,
+    ) -> u64 {
+        client.create_round(
+            admin,
+            token_addr,
+            &matching_pool,
+            &String::from_str(env, "Round"),
+            &String::from_str(env, "Test round"),
+            &start_ledger,
+            &end_ledger,
+        )
+    }
+
+    fn register_project(
+        env: &Env,
+        client: &QuadraticContractClient<'static>,
+        round_id: u64,
+        owner: &Address,
+    ) -> u64 {
+        client.register_project(
+            &round_id,
+            owner,
+            &String::from_str(env, "Project"),
+            &String::from_str(env, "Desc"),
+        )
+    }
+
+    fn project_ids(env: &Env, ids: &[u64]) -> Vec<u64> {
+        let mut v = Vec::new(env);
+        for id in ids {
+            v.push_back(*id);
+        }
+        v
+    }
+
+    fn assert_round_event(env: &Env, name: Symbol) {
+        let expected_topics: Vec<Val> = (symbol_short!("round"), name).into_val(env);
+        let mut found = false;
+
+        for (_, topics, _) in env.events().all().iter() {
+            if topics == expected_topics {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found, "expected round event was not emitted");
+    }
+
     #[test]
     fn isqrt_correctness() {
         assert_eq!(isqrt(0), 0);
@@ -370,13 +434,13 @@ mod tests {
         assert_eq!(isqrt(9), 3);
         assert_eq!(isqrt(10), 3);
         assert_eq!(isqrt(100), 10);
+        assert_eq!(isqrt(1_000_000), 1_000);
     }
 
     #[test]
     fn full_round_lifecycle() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let tok = StellarAssetClient::new(&env, &token_addr);
+        let token_addr = make_token(&env, &admin);
 
         let owner1 = Address::generate(&env);
         let owner2 = Address::generate(&env);
@@ -384,45 +448,30 @@ mod tests {
         let c2 = Address::generate(&env);
         let c3 = Address::generate(&env);
 
-        tok.mint(&admin, &1_000);
-        tok.mint(&c1, &500);
-        tok.mint(&c2, &500);
-        tok.mint(&c3, &500);
+        mint(&env, &token_addr, &admin, 1_000);
+        mint(&env, &token_addr, &c1, 500);
+        mint(&env, &token_addr, &c2, 500);
+        mint(&env, &token_addr, &c3, 500);
 
         let seq = env.ledger().sequence();
-        let round_id = client.create_round(
-            &admin,
-            &token_addr,
-            &1_000i128,
-            &String::from_str(&env, "Round 1"),
-            &String::from_str(&env, "Test round"),
-            &seq,
-            &(seq + 100),
-        );
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 100);
+        assert_round_event(&env, symbol_short!("created"));
 
-        let p1 = client.register_project(
-            &round_id,
-            &owner1,
-            &String::from_str(&env, "Project A"),
-            &String::from_str(&env, "Desc A"),
-        );
-        let p2 = client.register_project(
-            &round_id,
-            &owner2,
-            &String::from_str(&env, "Project B"),
-            &String::from_str(&env, "Desc B"),
-        );
+        let p1 = register_project(&env, &client, round_id, &owner1);
+        let p2 = register_project(&env, &client, round_id, &owner2);
+        assert_round_event(&env, symbol_short!("proj_reg"));
 
         // p1 gets 3 unique contributors, p2 gets 1
         client.contribute(&c1, &round_id, &p1, &100i128);
         client.contribute(&c2, &round_id, &p1, &100i128);
         client.contribute(&c3, &round_id, &p1, &100i128);
         client.contribute(&c1, &round_id, &p2, &100i128);
+        assert_round_event(&env, symbol_short!("contrib"));
 
-        let mut ids = Vec::new(&env);
-        ids.push_back(p1);
-        ids.push_back(p2);
+        let ids = project_ids(&env, &[p1, p2]);
         client.finalize_round(&round_id, &ids);
+        assert_round_event(&env, symbol_short!("payout"));
+        assert_round_event(&env, symbol_short!("finalized"));
 
         // p1: sqrt(3)=1, p2: sqrt(1)=1 → equal split of 1000 = 500 each
         // p1 payout = 300 contributions + 500 matching = 800
@@ -436,28 +485,15 @@ mod tests {
     #[test]
     fn contributor_count_unique_only() {
         let (env, client, admin) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token_addr).mint(&admin, &1_000);
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &admin, 1_000);
         let contributor = Address::generate(&env);
-        StellarAssetClient::new(&env, &token_addr).mint(&contributor, &500);
+        mint(&env, &token_addr, &contributor, 500);
 
         let owner = Address::generate(&env);
         let seq = env.ledger().sequence();
-        let round_id = client.create_round(
-            &admin,
-            &token_addr,
-            &1_000i128,
-            &String::from_str(&env, "R"),
-            &String::from_str(&env, "D"),
-            &seq,
-            &(seq + 100),
-        );
-        let proj_id = client.register_project(
-            &round_id,
-            &owner,
-            &String::from_str(&env, "P"),
-            &String::from_str(&env, "D"),
-        );
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 100);
+        let proj_id = register_project(&env, &client, round_id, &owner);
 
         client.contribute(&contributor, &round_id, &proj_id, &100i128);
         client.contribute(&contributor, &round_id, &proj_id, &100i128);
@@ -465,5 +501,179 @@ mod tests {
         let p = client.get_project(&round_id, &proj_id);
         assert_eq!(p.contributor_count, 1); // still 1 unique contributor
         assert_eq!(p.total_contributions, 200);
+    }
+
+    #[test]
+    fn finalize_zero_contributors_distributes_no_matching() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &admin, 1_000);
+        let owner = Address::generate(&env);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 100);
+        let project_id = register_project(&env, &client, round_id, &owner);
+        let ids = project_ids(&env, &[project_id]);
+
+        client.finalize_round(&round_id, &ids);
+
+        let project = client.get_project(&round_id, &project_id);
+        assert_eq!(project.matching_amount, 0);
+        assert_eq!(TokenClient::new(&env, &token_addr).balance(&owner), 0);
+        assert_eq!(client.get_round(&round_id).status, RoundStatus::Finalized);
+    }
+
+    #[test]
+    fn single_project_receives_full_matching_pool() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        let owner = Address::generate(&env);
+        let contributor = Address::generate(&env);
+        mint(&env, &token_addr, &admin, 1_000);
+        mint(&env, &token_addr, &contributor, 100);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 100);
+        let project_id = register_project(&env, &client, round_id, &owner);
+        client.contribute(&contributor, &round_id, &project_id, &100i128);
+
+        let ids = project_ids(&env, &[project_id]);
+        client.finalize_round(&round_id, &ids);
+
+        let project = client.get_project(&round_id, &project_id);
+        assert_eq!(project.matching_amount, 1_000);
+        assert_eq!(TokenClient::new(&env, &token_addr).balance(&owner), 1_100);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside round window")]
+    fn contribute_rejects_before_round_window() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        let owner = Address::generate(&env);
+        let contributor = Address::generate(&env);
+        mint(&env, &token_addr, &admin, 1_000);
+        mint(&env, &token_addr, &contributor, 100);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq + 10, seq + 20);
+        let project_id = register_project(&env, &client, round_id, &owner);
+
+        client.contribute(&contributor, &round_id, &project_id, &100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside round window")]
+    fn contribute_rejects_after_round_window() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        let owner = Address::generate(&env);
+        let contributor = Address::generate(&env);
+        mint(&env, &token_addr, &admin, 1_000);
+        mint(&env, &token_addr, &contributor, 100);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 5);
+        let project_id = register_project(&env, &client, round_id, &owner);
+        env.ledger().with_mut(|ledger| ledger.sequence_number = seq + 6);
+
+        client.contribute(&contributor, &round_id, &project_id, &100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "round not active")]
+    fn register_project_rejects_finalized_round() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        let owner = Address::generate(&env);
+        mint(&env, &token_addr, &admin, 1_000);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 100);
+        let project_id = register_project(&env, &client, round_id, &owner);
+        let ids = project_ids(&env, &[project_id]);
+        client.finalize_round(&round_id, &ids);
+
+        client.register_project(
+            &round_id,
+            &owner,
+            &String::from_str(&env, "Late project"),
+            &String::from_str(&env, "Desc"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "round not active")]
+    fn contribute_rejects_finalized_round() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        let owner = Address::generate(&env);
+        let contributor = Address::generate(&env);
+        mint(&env, &token_addr, &admin, 1_000);
+        mint(&env, &token_addr, &contributor, 100);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 100);
+        let project_id = register_project(&env, &client, round_id, &owner);
+        let ids = project_ids(&env, &[project_id]);
+        client.finalize_round(&round_id, &ids);
+
+        client.contribute(&contributor, &round_id, &project_id, &100i128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn finalize_round_requires_admin_auth() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        let owner = Address::generate(&env);
+        let caller = Address::generate(&env);
+        mint(&env, &token_addr, &admin, 1_000);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_000, seq, seq + 100);
+        let project_id = register_project(&env, &client, round_id, &owner);
+        let ids = project_ids(&env, &[project_id]);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &caller,
+                invoke: &MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "finalize_round",
+                    args: (&round_id, &ids).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .finalize_round(&round_id, &ids);
+    }
+
+    #[test]
+    fn matching_pool_remainder_is_left_as_dust() {
+        let (env, client, admin) = setup();
+        let token_addr = make_token(&env, &admin);
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let c1 = Address::generate(&env);
+        let c2 = Address::generate(&env);
+        mint(&env, &token_addr, &admin, 1_001);
+        mint(&env, &token_addr, &c1, 100);
+        mint(&env, &token_addr, &c2, 100);
+
+        let seq = env.ledger().sequence();
+        let round_id = create_round(&env, &client, &admin, &token_addr, 1_001, seq, seq + 100);
+        let p1 = register_project(&env, &client, round_id, &owner1);
+        let p2 = register_project(&env, &client, round_id, &owner2);
+        client.contribute(&c1, &round_id, &p1, &100i128);
+        client.contribute(&c2, &round_id, &p2, &100i128);
+
+        let ids = project_ids(&env, &[p1, p2]);
+        client.finalize_round(&round_id, &ids);
+
+        assert_eq!(client.get_project(&round_id, &p1).matching_amount, 500);
+        assert_eq!(client.get_project(&round_id, &p2).matching_amount, 500);
+        let tok = TokenClient::new(&env, &token_addr);
+        assert_eq!(tok.balance(&owner1), 600);
+        assert_eq!(tok.balance(&owner2), 600);
     }
 }
