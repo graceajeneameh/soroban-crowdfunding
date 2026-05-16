@@ -265,9 +265,9 @@ impl GrantsContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::Address as _,
+        testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
         token::{Client as TokenClient, StellarAssetClient},
-        Env, String, Vec,
+        Env, IntoVal, String, Symbol, Val, Vec,
     };
 
     fn setup() -> (Env, GrantsContractClient<'static>, Address, Address, Address) {
@@ -301,59 +301,97 @@ mod tests {
         v
     }
 
+    fn make_single_milestone(env: &Env, amount: i128) -> Vec<Milestone> {
+        let mut v = Vec::new(env);
+        v.push_back(Milestone {
+            index: 0,
+            description: String::from_str(env, "Phase 1"),
+            amount,
+            evidence: String::from_str(env, ""),
+            status: MilestoneStatus::Pending,
+        });
+        v
+    }
+
+    fn make_token(env: &Env, admin: &Address) -> Address {
+        env.register_stellar_asset_contract_v2(admin.clone()).address()
+    }
+
+    fn mint(env: &Env, token: &Address, to: &Address, amount: i128) {
+        StellarAssetClient::new(env, token).mint(to, &amount);
+    }
+
+    fn create_test_grant(
+        env: &Env,
+        client: &GrantsContractClient<'static>,
+        grantor: &Address,
+        grantee: &Address,
+        token_addr: &Address,
+        milestones: &Vec<Milestone>,
+    ) -> u64 {
+        client.create_grant(
+            grantor,
+            grantee,
+            token_addr,
+            &String::from_str(env, "Build"),
+            &String::from_str(env, "Desc"),
+            milestones,
+        )
+    }
+
+    fn assert_grant_event(env: &Env, name: Symbol) {
+        let expected_topics: Vec<Val> = (symbol_short!("grant"), name).into_val(env);
+        let mut found = false;
+
+        for (_, topics, _) in env.events().all().iter() {
+            if topics == expected_topics {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found, "expected grant event was not emitted");
+    }
+
     #[test]
     fn full_grant_lifecycle() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token_addr).mint(&grantor, &1_000);
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &grantor, 1_000);
 
         let milestones = make_milestones(&env);
-        let grant_id = client.create_grant(
-            &grantor,
-            &grantee,
-            &token_addr,
-            &String::from_str(&env, "Build"),
-            &String::from_str(&env, "Desc"),
-            &milestones,
-        );
+        let grant_id =
+            create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
+        assert_grant_event(&env, symbol_short!("created"));
 
         client.submit_milestone(&grant_id, &0u32, &String::from_str(&env, "proof1"));
+        assert_grant_event(&env, symbol_short!("submitted"));
         client.approve_milestone(&grant_id, &0u32);
+        assert_grant_event(&env, symbol_short!("approved"));
         assert_eq!(TokenClient::new(&env, &token_addr).balance(&grantee), 300);
 
         client.submit_milestone(&grant_id, &1u32, &String::from_str(&env, "proof2"));
         client.approve_milestone(&grant_id, &1u32);
         assert_eq!(TokenClient::new(&env, &token_addr).balance(&grantee), 1_000);
         assert_eq!(client.get_grant(&grant_id).status, GrantStatus::Completed);
+        assert_grant_event(&env, symbol_short!("completed"));
     }
 
     #[test]
     fn reject_then_resubmit() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token_addr).mint(&grantor, &300);
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &grantor, 300);
 
-        let mut milestones = Vec::new(&env);
-        milestones.push_back(Milestone {
-            index: 0,
-            description: String::from_str(&env, "M1"),
-            amount: 300,
-            evidence: String::from_str(&env, ""),
-            status: MilestoneStatus::Pending,
-        });
-        let id = client.create_grant(
-            &grantor,
-            &grantee,
-            &token_addr,
-            &String::from_str(&env, "G"),
-            &String::from_str(&env, "D"),
-            &milestones,
-        );
+        let milestones = make_single_milestone(&env, 300);
+        let id = create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
 
         client.submit_milestone(&id, &0u32, &String::from_str(&env, "bad proof"));
         client.reject_milestone(&id, &0u32);
         let m = client.get_grant(&id).milestones.get(0).unwrap();
         assert_eq!(m.status, MilestoneStatus::Pending);
+        assert_eq!(m.evidence, String::from_str(&env, ""));
+        assert_grant_event(&env, symbol_short!("rejected"));
 
         client.submit_milestone(&id, &0u32, &String::from_str(&env, "good proof"));
         client.approve_milestone(&id, &0u32);
@@ -363,18 +401,11 @@ mod tests {
     #[test]
     fn revoke_reclaims_undisbursed() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        StellarAssetClient::new(&env, &token_addr).mint(&grantor, &1_000);
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &grantor, 1_000);
 
         let milestones = make_milestones(&env);
-        let id = client.create_grant(
-            &grantor,
-            &grantee,
-            &token_addr,
-            &String::from_str(&env, "G"),
-            &String::from_str(&env, "D"),
-            &milestones,
-        );
+        let id = create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
 
         client.submit_milestone(&id, &0u32, &String::from_str(&env, "proof"));
         client.approve_milestone(&id, &0u32); // 300 disbursed
@@ -382,6 +413,112 @@ mod tests {
 
         // grantor gets back 700
         assert_eq!(TokenClient::new(&env, &token_addr).balance(&grantor), 700);
+        assert_eq!(client.get_grant(&id).status, GrantStatus::Revoked);
+        assert_grant_event(&env, symbol_short!("revoked"));
+    }
+
+    #[test]
+    #[should_panic(expected = "need at least one milestone")]
+    fn create_grant_rejects_empty_milestones() {
+        let (env, client, admin, grantor, grantee) = setup();
+        let token_addr = make_token(&env, &admin);
+        let milestones = Vec::new(&env);
+
+        create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
+    }
+
+    #[test]
+    #[should_panic(expected = "total must be positive")]
+    fn create_grant_rejects_zero_total_amount() {
+        let (env, client, admin, grantor, grantee) = setup();
+        let token_addr = make_token(&env, &admin);
+        let milestones = make_single_milestone(&env, 0);
+
+        create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
+    }
+
+    #[test]
+    #[should_panic]
+    fn submit_milestone_requires_grantee_auth() {
+        let (env, client, admin, grantor, grantee) = setup();
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &grantor, 300);
+
+        let milestones = make_single_milestone(&env, 300);
+        let id = create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
+        let evidence = String::from_str(&env, "proof");
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &grantor,
+                invoke: &MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "submit_milestone",
+                    args: (&id, &0u32, &evidence).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .submit_milestone(&id, &0u32, &evidence);
+    }
+
+    #[test]
+    #[should_panic(expected = "not submitted")]
+    fn approve_milestone_rejects_pending_milestone() {
+        let (env, client, admin, grantor, grantee) = setup();
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &grantor, 300);
+
+        let milestones = make_single_milestone(&env, 300);
+        let id = create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
+
+        client.approve_milestone(&id, &0u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "grant not active")]
+    fn revoke_grant_rejects_completed_grant() {
+        let (env, client, admin, grantor, grantee) = setup();
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &grantor, 300);
+
+        let milestones = make_single_milestone(&env, 300);
+        let id = create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
+
+        client.submit_milestone(&id, &0u32, &String::from_str(&env, "proof"));
+        client.approve_milestone(&id, &0u32);
+        assert_eq!(client.get_grant(&id).status, GrantStatus::Completed);
+
+        client.revoke_grant(&id);
+    }
+
+    #[test]
+    fn revoke_grant_handles_no_remaining_funds() {
+        let (env, client, admin, grantor, grantee) = setup();
+        let token_addr = make_token(&env, &admin);
+        mint(&env, &token_addr, &grantor, 300);
+
+        let mut milestones = Vec::new(&env);
+        milestones.push_back(Milestone {
+            index: 0,
+            description: String::from_str(&env, "Funded phase"),
+            amount: 300,
+            evidence: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+        });
+        milestones.push_back(Milestone {
+            index: 1,
+            description: String::from_str(&env, "Admin closeout"),
+            amount: 0,
+            evidence: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+        });
+        let id = create_test_grant(&env, &client, &grantor, &grantee, &token_addr, &milestones);
+
+        client.submit_milestone(&id, &0u32, &String::from_str(&env, "proof"));
+        client.approve_milestone(&id, &0u32);
+        client.revoke_grant(&id);
+
+        assert_eq!(TokenClient::new(&env, &token_addr).balance(&grantor), 0);
         assert_eq!(client.get_grant(&id).status, GrantStatus::Revoked);
     }
 }
