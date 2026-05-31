@@ -270,7 +270,13 @@ mod tests {
         Env, String, Vec,
     };
 
-    fn setup() -> (Env, GrantsContractClient<'static>, Address, Address, Address) {
+    fn setup() -> (
+        Env,
+        GrantsContractClient<'static>,
+        Address,
+        Address,
+        Address,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
         let id = env.register_contract(None, GrantsContract);
@@ -304,7 +310,9 @@ mod tests {
     #[test]
     fn full_grant_lifecycle() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&grantor, &1_000);
 
         let milestones = make_milestones(&env);
@@ -330,7 +338,9 @@ mod tests {
     #[test]
     fn reject_then_resubmit() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&grantor, &300);
 
         let mut milestones = Vec::new(&env);
@@ -363,7 +373,9 @@ mod tests {
     #[test]
     fn revoke_reclaims_undisbursed() {
         let (env, client, admin, grantor, grantee) = setup();
-        let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         StellarAssetClient::new(&env, &token_addr).mint(&grantor, &1_000);
 
         let milestones = make_milestones(&env);
