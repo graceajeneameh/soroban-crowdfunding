@@ -16,53 +16,81 @@ fn grant_key(id: u64) -> (Symbol, u64) {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Lifecycle state for a grant.
 pub enum GrantStatus {
+    /// Grant is funded and accepting milestone submissions.
     Active,
+    /// All milestones have been approved.
     Completed,
+    /// Grantor revoked the grant before completion.
     Revoked,
 }
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Review state for an individual grant milestone.
 pub enum MilestoneStatus {
+    /// Milestone work has not been submitted.
     Pending,
+    /// Grantee submitted evidence for grantor review.
     Submitted,
+    /// Grantor approved the milestone and released funds.
     Approved,
+    /// Grantor rejected the submitted evidence.
     Rejected,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Work package and payout unit inside a grant.
 pub struct Milestone {
+    /// Milestone position in the grant.
     pub index: u32,
+    /// Description of the deliverable.
     pub description: String,
+    /// Token amount released when this milestone is approved.
     pub amount: i128,
+    /// Evidence supplied by the grantee for review.
     pub evidence: String,
+    /// Current review state.
     pub status: MilestoneStatus,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Stored grant agreement and disbursement state.
 pub struct Grant {
+    /// Unique grant identifier.
     pub id: u64,
+    /// Address funding and approving the grant.
     pub grantor: Address,
+    /// Address completing milestones and receiving payouts.
     pub grantee: Address,
+    /// Token contract used for grant payments.
     pub token: Address,
+    /// Total amount locked when the grant is created.
     pub total_amount: i128,
+    /// Amount already released to the grantee.
     pub disbursed_amount: i128,
+    /// Human-readable grant title.
     pub title: String,
+    /// Longer grant description.
     pub description: String,
+    /// Ordered list of grant milestones.
     pub milestones: Vec<Milestone>,
+    /// Current grant lifecycle state.
     pub status: GrantStatus,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
+/// Milestone-based grant escrow contract.
 pub struct GrantsContract;
 
 #[contractimpl]
 impl GrantsContract {
+    /// One-time initialization that stores the contract admin.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&ADMIN) {
             panic!("already initialized");
@@ -251,6 +279,7 @@ impl GrantsContract {
 
     // ── Views ─────────────────────────────────────────────────────────────────
 
+    /// Return a stored grant by id.
     pub fn get_grant(env: Env, grant_id: u64) -> Grant {
         env.storage()
             .persistent()
