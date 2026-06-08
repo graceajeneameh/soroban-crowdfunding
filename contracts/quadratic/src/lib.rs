@@ -38,45 +38,73 @@ fn proj_cnt_key(round_id: u64) -> (Symbol, u64) {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Lifecycle state for a quadratic funding round.
 pub enum RoundStatus {
+    /// Round is accepting projects and contributions.
     Active,
+    /// Matching has been calculated and paid out.
     Finalized,
+    /// Round was cancelled before finalization.
     Cancelled,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Stored configuration and state for a funding round.
 pub struct Round {
+    /// Unique round identifier.
     pub id: u64,
+    /// Round administrator and matching pool funder.
     pub admin: Address,
+    /// Token contract used for contributions and matching payouts.
     pub token: Address,
+    /// Total matching pool locked for the round.
     pub matching_pool: i128,
+    /// Human-readable round title.
     pub title: String,
+    /// Longer round description.
     pub description: String,
+    /// First ledger sequence that accepts contributions.
     pub start_ledger: u32,
+    /// Last ledger sequence that accepts contributions.
     pub end_ledger: u32,
+    /// Current round lifecycle state.
     pub status: RoundStatus,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Project registered in a quadratic funding round.
 pub struct Project {
+    /// Project identifier within the round.
     pub id: u64,
+    /// Round that owns this project.
     pub round_id: u64,
+    /// Project owner receiving contributions and matching funds.
     pub owner: Address,
+    /// Human-readable project title.
     pub title: String,
+    /// Longer project description.
     pub description: String,
+    /// Sum of direct contributions.
     pub total_contributions: i128,
+    /// Number of unique contributor addresses.
     pub contributor_count: u32,
+    /// Matching amount assigned during finalization.
     pub matching_amount: i128,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Per-contributor contribution record for a project.
 pub struct Contribution {
+    /// Round containing the project.
     pub round_id: u64,
+    /// Project that received the contribution.
     pub project_id: u64,
+    /// Contributor address.
     pub contributor: Address,
+    /// Total contributed amount from this address.
     pub amount: i128,
 }
 
@@ -99,10 +127,12 @@ fn isqrt(n: i128) -> i128 {
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
+/// Quadratic funding round and payout contract.
 pub struct QuadraticContract;
 
 #[contractimpl]
 impl QuadraticContract {
+    /// One-time initialization that stores the contract admin.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&ADMIN) {
             panic!("already initialized");
@@ -331,6 +361,7 @@ impl QuadraticContract {
 
     // ── Views ─────────────────────────────────────────────────────────────────
 
+    /// Return a stored funding round by id.
     pub fn get_round(env: Env, round_id: u64) -> Round {
         env.storage()
             .persistent()
@@ -338,6 +369,7 @@ impl QuadraticContract {
             .expect("round not found")
     }
 
+    /// Return a project registered in a round.
     pub fn get_project(env: Env, round_id: u64, project_id: u64) -> Project {
         env.storage()
             .persistent()
@@ -345,6 +377,7 @@ impl QuadraticContract {
             .expect("project not found")
     }
 
+    /// Return a contributor's stored contribution record for a project.
     pub fn get_contribution(
         env: Env,
         round_id: u64,

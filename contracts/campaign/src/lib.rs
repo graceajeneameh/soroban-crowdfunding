@@ -23,50 +23,78 @@ fn donation_key(campaign_id: u64, donor: &Address) -> (Symbol, u64, Address) {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Lifecycle state for a crowdfunding campaign.
 pub enum CampaignStatus {
+    /// Created but waiting for curated approval.
     Pending,
+    /// Open for donations.
     Active,
+    /// Funding goal has been reached.
     Successful,
+    /// Deadline passed before the funding goal was reached.
     Failed,
+    /// Cancelled before completion.
     Cancelled,
 }
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
+/// Approval mode for a campaign.
 pub enum CampaignType {
+    /// Campaign is active immediately after creation.
     Open,
+    /// Campaign requires admin approval before donations are accepted.
     Curated,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Stored metadata and funding state for a campaign.
 pub struct Campaign {
+    /// Unique campaign identifier.
     pub id: u64,
+    /// Address that created the campaign and can withdraw successful funds.
     pub creator: Address,
+    /// Token contract accepted by this campaign.
     pub token: Address,
+    /// Funding goal denominated in the campaign token.
     pub goal: i128,
+    /// Total amount raised and not yet withdrawn.
     pub raised: i128,
+    /// Human-readable campaign title.
     pub title: String,
+    /// Longer campaign description.
     pub description: String,
+    /// Category name selected from the approved category list.
     pub category: String,
+    /// Campaign approval mode.
     pub campaign_type: CampaignType,
+    /// Ledger sequence after which the campaign expires.
     pub deadline_ledger: u32,
+    /// Current lifecycle state.
     pub status: CampaignStatus,
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// Per-donor contribution record for a campaign.
 pub struct DonationRecord {
+    /// Campaign that received the donation.
     pub campaign_id: u64,
+    /// Donor address.
     pub donor: Address,
+    /// Current refundable donation amount.
     pub amount: i128,
+    /// Whether this donation has already been refunded.
     pub refunded: bool,
+    /// Ledger sequence of the most recent donation update.
     pub ledger: u32,
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
+/// Crowdfunding campaign management contract.
 pub struct CampaignContract;
 
 #[contractimpl]
@@ -392,6 +420,7 @@ impl CampaignContract {
 
     // ── Views ────────────────────────────────────────────────────────────────
 
+    /// Return a stored campaign by id.
     pub fn get_campaign(env: Env, campaign_id: u64) -> Campaign {
         env.storage()
             .persistent()
@@ -399,6 +428,7 @@ impl CampaignContract {
             .expect("campaign not found")
     }
 
+    /// Return a donor's contribution record for a campaign.
     pub fn get_donation(env: Env, campaign_id: u64, donor: Address) -> DonationRecord {
         env.storage()
             .persistent()
